@@ -1,8 +1,20 @@
 [project]
-name = "flask-lab"
+name = "flask-lab" 
 version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.9"
 dependencies = [
-    "flask>=3.1.1",
+    "flask[async]>=3.1.1",
+    "hypercorn==0.17.3",
 ]
+
+# 配置PyPI镜像源
+[[tool.uv.pip.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"  # 主镜像源
+verify_ssl = false  # 可选：是否验证SSL（私有源可设为false）
+
+# 可选：添加备用源
+#[[tool.uv.pip.index]]
+#url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+#verify_ssl = false
+#priority = "low"  # 低优先级，主源失败时使用
