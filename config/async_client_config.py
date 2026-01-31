@@ -5,6 +5,7 @@
 # async_http_client.py
 import asyncio
 import logging
+from functools import wraps
 from typing import Optional
 
 import aiohttp
@@ -15,24 +16,20 @@ logger = logging.getLogger(__name__)
 class AsyncHTTPClientPool:
     """简化的异步HTTP客户端池"""
 
-    _instance = None
-    _session = None
+    _lock: asyncio.Lock = aiohttp.Lock()
+    _session: Optional[aiohttp.ClientSession] = None
+    _connector: Optional[aiohttp.TCPConnector] = None
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __init__(self):
-        if not hasattr(self, '_initialized'):
-            self._connector = None
-            self._initialized = True
-
-    async def get_session(self) -> aiohttp.ClientSession:
-        """获取共享的客户端会话"""
-        if self._session is None or self._session.closed:
+    @classmethod
+    async def _init_session(cls):
+        if cls._session is not None and not cls._session.closed:
+            return
+        """初始化HTTP会话（延迟懒加载）"""
+        async with cls._lock:
+            if cls._session is not None and not cls._session.closed:
+                return
             # 为3000台设备优化连接池配置
-            self._connector = aiohttp.TCPConnector(
+            cls._connector = aiohttp.TCPConnector(
                 limit=500,  # 总连接数，根据系统资源调整
                 limit_per_host=0,  # 不限制单个主机连接数，让连接池自由分配
                 enable_cleanup_closed=True,
@@ -41,22 +38,41 @@ class AsyncHTTPClientPool:
             )
 
             timeout = aiohttp.ClientTimeout(
-                total=80,  # 总超时30秒
-                connect=30,  # 连接超时10秒
-                sock_read=30  # 读取超时25秒
+                total=2 * 60,  # 总超时秒
+                connect=30,  # 连接超时秒
+                sock_read=30  # 读取超时秒
             )
 
-            self._session = aiohttp.ClientSession(
-                connector=self._connector,
+            cls._session = aiohttp.ClientSession(
+                connector=cls._connector,
                 timeout=timeout,
             )
             logger.info("初始化HTTP客户端会话完成")
 
-        return self._session
+    @classmethod
+    def ensure_session(cls, func):
+        """装饰器：确保会话已初始化"""
 
-    async def request(self, method: str, url: str, **kwargs) -> Optional[aiohttp.ClientResponse]:
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            if cls._session is None or cls._session.closed:
+                await cls._init_session()
+            return await func(*args, **kwargs)
+
+        return wrapper
+
+    @classmethod
+    async def get_session(cls) -> Optional[aiohttp.ClientSession]:
+        if cls._session is not None and not cls._session.closed:
+            return cls._session
+        await cls._init_session()
+        return cls._session
+
+    @classmethod
+    @ensure_session
+    async def request(cls, method: str, url: str, **kwargs) -> Optional[aiohttp.ClientResponse]:
         """执行HTTP请求"""
-        session = await self.get_session()
+        session = await cls.get_session()
 
         # 对于周期性任务，使用简单的重试机制
         try:
@@ -64,20 +80,44 @@ class AsyncHTTPClientPool:
                 return response
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f'请求异常：error-{e}')
+        except Exception as e:
+            logger.error(f'未知异常：error-{e}')
         return None
 
-    async def get(self, url: str, **kwargs):
+    @classmethod
+    async def get(cls, url: str, **kwargs):
         """GET请求快捷方法"""
-        return await self.request('GET', url, **kwargs)
+        return await cls.request('GET', url, **kwargs)
 
-    async def post(self, url: str, **kwargs):
+    @classmethod
+    async def post(cls, url: str, **kwargs):
         """POST请求快捷方法"""
-        return await self.request('POST', url, **kwargs)
+        return await cls.request('POST', url, **kwargs)
 
-    async def close(self):
+    @classmethod
+    async def put(cls, url: str, **kwargs) -> Optional[aiohttp.ClientResponse]:
+        """PUT请求快捷方法"""
+        return await cls.request('PUT', url, **kwargs)
+
+    @classmethod
+    async def delete(cls, url: str, **kwargs) -> Optional[aiohttp.ClientResponse]:
+        """DELETE请求快捷方法"""
+        return await cls.request('DELETE', url, **kwargs)
+
+    @classmethod
+    async def patch(cls, url: str, **kwargs) -> Optional[aiohttp.ClientResponse]:
+        """PATCH请求快捷方法"""
+        return await cls.request('PATCH', url, **kwargs)
+
+    @classmethod
+    async def close(cls):
         """关闭连接池"""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
-            logger.info("关闭HTTP客户端会话")
-
+        if cls._session is None or cls._session.closed:
+            return
+        async with cls._lock:
+            if cls._session is None or cls._session.closed:
+                return
+            await cls._session.close()
+            cls._session = None
+            cls._connector = None
+        logger.info("关闭HTTP客户端会话完成")

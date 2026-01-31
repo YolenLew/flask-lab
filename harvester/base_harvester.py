@@ -160,4 +160,4 @@ class HarvesterBase:
 
     async def insert_monitor_cpu(self):
         """CPU指标信息"""
-        self.fetch_info(target_part=["cpu"])
+        await self.fetch_info(target_part=["cpu"])
